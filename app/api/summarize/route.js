@@ -1,32 +1,104 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
+import { Innertube } from "youtubei.js/web";
 
 export async function POST(req) {
   const { videoUrl } = await req.json();
 
   let transcriptData;
   try {
-    const response = await fetch(
-      `http://localhost:8080/api/transcript?url=${encodeURIComponent(videoUrl)}`
+    let videoId = videoUrl;
+    if (videoUrl.includes("youtube.com") || videoUrl.includes("youtu.be")) {
+      try {
+        if (videoUrl.includes("youtube.com/watch?v=")) {
+          videoId = new URL(videoUrl).searchParams.get("v");
+        } else if (videoUrl.includes("youtu.be/")) {
+          videoId = videoUrl.split("youtu.be/")[1].split("?")[0];
+        }
+      } catch (e) {
+        console.log("URL parsing failed, using original input");
+      }
+    }
+
+    console.log(`Attempting to fetch video with ID/URL: ${videoId}`);
+
+    const youtube = await Innertube.create({
+      lang: "en",
+      location: "US",
+      retrieve_player: true,
+      generate_session_locally: true,
+      client: {
+        hl: "en",
+        gl: "US",
+      },
+    });
+
+    const info = await youtube.getInfo(videoId);
+
+    let captionsAvailable = false;
+    if (
+      info.captions &&
+      info.captions.captionTracks &&
+      info.captions.captionTracks.length > 0
+    ) {
+      captionsAvailable = true;
+      console.log("Captions are available via caption tracks");
+    }
+
+    if (!captionsAvailable) {
+      try {
+        const transcript = await youtube.getTranscript(videoId);
+        if (transcript) {
+          transcriptData = transcript.map((item) => ({
+            text: item.text,
+            offset: item.start * 1000,
+          }));
+          console.log("Retrieved transcript using direct method");
+        }
+      } catch (directError) {
+        console.log("Direct transcript method failed:", directError.message);
+      }
+    }
+
+    if (!transcriptData) {
+      try {
+        const transcript = await info.getTranscript();
+        transcriptData =
+          transcript.transcript.content.body.initial_segments.map(
+            (segment) => ({
+              text: segment.snippet.text,
+              offset: segment.snippet.start_time_ms,
+            })
+          );
+        console.log("Retrieved transcript using info.getTranscript()");
+      } catch (transcriptError) {
+        console.error(
+          "Standard transcript retrieval failed:",
+          transcriptError.message
+        );
+      }
+    }
+
+    if (!transcriptData || transcriptData.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not extract transcript data from this video. The video may not have captions enabled.",
+        },
+        { status: 404 }
+      );
+    }
+
+    console.log(
+      `Successfully retrieved ${transcriptData.length} transcript segments`
     );
-
-    if (!response.ok) {
-      throw new Error("Failed to fetch transcript from external API.");
-    }
-
-    const data = await response.json();
-
-    if (!data.transcript || !Array.isArray(data.transcript)) {
-      throw new Error("Invalid transcript format received.");
-    }
-
-    transcriptData = data.transcript;
   } catch (error) {
-    console.error("Error fetching transcript:", error.message);
+    console.error("Error fetching transcript:", error);
     return NextResponse.json(
       {
-        error:
-          "Error fetching transcript. Please make sure the video has subtitles and the link is correct.",
+        error: "Error fetching transcript: " + error.message,
+        details:
+          "The API may be temporarily unavailable or the video might not be accessible",
       },
       { status: 400 }
     );
@@ -38,8 +110,6 @@ export async function POST(req) {
   for (let i = 0; i < transcriptData.length; i++) {
     text += `Timestamp: ${transcriptData[i].offset}, Text: ${transcriptData[i].text}\n`;
   }
-
-  console.log(text);
 
   const prompt = `
 You are a skilled summarizer. Your task is to create a clear, concise, and well-organized summary of the following YouTube video transcript.
@@ -60,19 +130,6 @@ Please follow this structured format for the summary:
   a. Summarize the final thoughts, conclusions, or recommendations made in the video.
   b. Mention any calls to action or final messages shared by the speaker.
 
-Example format:
-1. Introduction  
-  a. This video explores the causes and effects of urban air pollution in India.  
-  b. Hosted by an environmental researcher sharing recent findings.
-
-2. Health Impact of Air Pollution  
-  a. Airborne particles like PM2.5 deeply affect lung health.  
-  b. Children and elderly are most at risk.
-
-3. Conclusion  
-  a. The speaker urges government intervention and public awareness.  
-  b. Long-term action is critical to mitigate effects.
-
 Here is the transcript:
 ${text}
 `;
@@ -83,14 +140,11 @@ ${text}
       contents: prompt,
     });
 
-    console.log(response.text);
     return NextResponse.json({ summary: response.text });
   } catch (error) {
     console.error("Error generating summary:", error);
     return NextResponse.json(
-      {
-        error: "Error generating summary. Please try again.",
-      },
+      { error: "Error generating summary. Please try again." },
       { status: 400 }
     );
   }
