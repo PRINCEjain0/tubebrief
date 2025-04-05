@@ -71,6 +71,7 @@ export async function POST(req) {
     console.log(response.text);
     return NextResponse.json({ summary: response.text });
   } catch (error) {
+    console.error("Error generating summary:", error);
     return NextResponse.json(
       {
         error: "Error generating summary. Please try again.",
