@@ -16,7 +16,7 @@ export async function POST(req) {
           videoId = videoUrl.split("youtu.be/")[1].split("?")[0];
         }
       } catch (e) {
-        console.log("URL parsing failed, using original input");
+        console.log(`URL parsing failed, using original input${e}`);
       }
     }
 
